@@ -50,4 +50,8 @@ $('lockNow').addEventListener('click', async () => {
   }
 });
 
+$('assignShortcut').addEventListener('click', () => {
+  chrome.tabs.create({ url: 'chrome://extensions/shortcuts' });
+});
+
 init();
