@@ -58,7 +58,8 @@ function redirect(tabId, url = LOCK_URL) {
   return chrome.tabs.update(tabId, { url }).catch(() => {});
 }
 function isAllowed(url) {
-  return !!url && (url.startsWith(LOCK_URL) || url.startsWith(OPTIONS_URL));
+  // При блокировке разрешаем только экран блокировки
+  return !!url && url.startsWith(LOCK_URL);
 }
 function isRestorable(url) {
   return /^(https?|file|ftp):/i.test(url || '');
@@ -67,9 +68,11 @@ function isRestorable(url) {
 /* ---------- блокировка ---------- */
 async function lock() {
   const s = await getSettings();
-  if (!s.hash) { chrome.runtime.openOptionsPage(); return; }
+  if (!s.hash) {
+    chrome.runtime.openOptionsPage();
+    return { ok: false, error: 'Сначала задайте пароль в настройках.' };
+  }
 
-  const already = await isLocked();
   await chrome.storage.session.set({ unlocked: false, attempts: 0, blockedUntil: 0 });
 
   const tabs = await chrome.tabs.query({});
@@ -83,11 +86,14 @@ async function lock() {
     if (isRestorable(url)) {
       saved[String(t.id)] = url;
     }
+    // Перенаправляем все вкладки, включая настройки
     redirect(t.id);
   }
 
   await chrome.storage.session.set({ savedTabs: saved });
-  if (already) return enforceAll();
+  // Дополнительно ещё раз проходим по вкладкам
+  await enforceAll();
+  return { ok: true };
 }
 
 async function enforceAll() {
@@ -130,7 +136,7 @@ async function unlock(password) {
     return u.startsWith(LOCK_URL);
   });
 
-  // 4. Восстанавливаем вкладки по сохранённым ID (самый надёжный способ)
+  // 4. Восстанавливаем вкладки по сохранённым ID
   const restoredIds = new Set();
   for (const [idStr, url] of Object.entries(savedTabs)) {
     if (!isRestorable(url)) continue;
@@ -140,12 +146,11 @@ async function unlock(password) {
       await chrome.tabs.update(id, { url });
       restoredIds.add(id);
     } catch (e) {
-      // tabId мог стать недействительным — откроем новую вкладку позже
+      // tabId мог стать недействительным
     }
   }
 
-  // 5. Для тех lock-вкладок, которые не удалось восстановить по ID —
-  //    используем оставшиеся URL или просто уводим с экрана блокировки
+  // 5. Оставшиеся lock-вкладки и URL
   const remainingUrls = Object.entries(savedTabs)
     .filter(([idStr, url]) => isRestorable(url) && !restoredIds.has(Number(idStr)))
     .map(([, url]) => url);
@@ -155,16 +160,14 @@ async function unlock(password) {
     if (restoredIds.has(tab.id)) continue;
 
     if (urlIndex < remainingUrls.length) {
-      // Есть ещё невосстановленный URL — используем эту вкладку
       await chrome.tabs.update(tab.id, { url: remainingUrls[urlIndex++] }).catch(() => {});
     } else {
-      // Больше URL нет — просто уводим с экрана блокировки на новую вкладку
-      // (не закрываем вкладку, чтобы окно браузера не исчезло)
+      // Не закрываем вкладку — переводим на новую вкладку
       await chrome.tabs.update(tab.id, { url: 'chrome://newtab/' }).catch(() => {});
     }
   }
 
-  // 6. Если остались URL, для которых не хватило вкладок — открываем новые
+  // 6. Лишние URL — открываем новыми вкладками
   while (urlIndex < remainingUrls.length) {
     await chrome.tabs.create({ url: remainingUrls[urlIndex++], active: false }).catch(() => {});
   }
@@ -235,7 +238,7 @@ chrome.windows.onFocusChanged.addListener(async (id) => {
   if (await isLocked()) enforceAll(); else await touch();
 });
 
-chrome.action.onClicked.addListener(() => lock());
+chrome.action.onClicked.addListener(() => { lock(); });
 chrome.commands.onCommand.addListener((c) => { if (c === 'lock-now') lock(); });
 
 /* ---------- сообщения ---------- */
@@ -288,8 +291,7 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
       }
 
       case 'lockNow':
-        await lock();
-        return sendResponse({ ok: true });
+        return sendResponse(await lock());
 
       case 'openOptions':
         chrome.runtime.openOptionsPage();
