@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 const input = $('pw');
 let unlockedView = false;
 
-/* гасим горячие клавиши и контекстное меню на экране блокировки */
+/* Block hotkeys and context menu on the lock screen */
 window.addEventListener('keydown', (e) => {
   if (unlockedView) return;
   const typing = e.target === input && !e.ctrlKey && !e.altKey && !e.metaKey;
@@ -15,8 +15,8 @@ input.addEventListener('blur', () => { if (!unlockedView) setTimeout(() => input
 
 function showNoPassword() {
   unlockedView = true;
-  $('title').textContent = 'Пароль не задан';
-  $('sub').textContent = 'Задайте пароль в настройках расширения';
+  $('title').textContent = 'No password set';
+  $('sub').textContent = 'Set a password in the extension settings';
   input.style.display = 'none';
   $('go').style.display = 'none';
   $('setupLink').style.display = 'block';
@@ -24,8 +24,8 @@ function showNoPassword() {
 
 function showUnlocked() {
   unlockedView = true;
-  $('title').textContent = 'Разблокировано';
-  $('sub').textContent = 'Можно открыть новую вкладку или закрыть эту.';
+  $('title').textContent = 'Unlocked';
+  $('sub').textContent = 'You can open a new tab or close this one.';
   input.style.display = 'none';
   $('go').style.display = 'none';
   $('err').textContent = '';
@@ -47,10 +47,9 @@ $('form').addEventListener('submit', async (e) => {
   $('err').textContent = '';
   const r = await chrome.runtime.sendMessage({ type: 'unlock', password: input.value });
   input.value = '';
-  
+
   if (r.ok) {
-    // После успешного разблокирования background.js сам перенаправит 
-    // эту вкладку на исходный URL.
+    // background.js will redirect this tab to the original URL
     return;
   }
 
@@ -58,13 +57,13 @@ $('form').addEventListener('submit', async (e) => {
     let left = r.wait;
     $('go').disabled = true;
     const tick = () => {
-      $('err').textContent = 'Слишком много попыток. Подождите ' + left + ' с.';
+      $('err').textContent = 'Too many attempts. Wait ' + left + ' s.';
       if (left-- <= 0) { clearInterval(t); $('err').textContent = ''; $('go').disabled = false; }
     };
     tick();
     const t = setInterval(tick, 1000);
   } else {
-    $('err').textContent = 'Неверный пароль. Осталось попыток: ' + r.left;
+    $('err').textContent = 'Wrong password. Attempts left: ' + r.left;
   }
   input.focus();
 });
