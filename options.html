@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Настройки Chrome Password Lock</title>
+  <style>
+    body { font: 14px/1.55 system-ui, 'Segoe UI', sans-serif; max-width: 470px; margin: 40px auto; padding: 0 20px; color: #1c2130; }
+    h1 { font-size: 19px; }
+    h2 { font-size: 15px; margin: 28px 0 8px; }
+    label { display: block; margin: 10px 0 4px; font-size: 13px; color: #5a6478; }
+    input { width: 100%; padding: 9px 11px; border: 1px solid #d3d8e3; border-radius: 8px; font-size: 14px; }
+    button { margin-top: 14px; padding: 9px 16px; border: 0; border-radius: 8px; background: #4f7cff; color: #fff; font-weight: 600; cursor: pointer; }
+    button.ghost { background: #eceff5; color: #1c2130; }
+    .msg { margin-top: 8px; font-size: 13px; min-height: 18px; }
+    .ok { color: #1a9c62; } .bad { color: #d64550; }
+    hr { border: 0; border-top: 1px solid #e6e9f0; margin: 26px 0; }
+    .hint { font-size: 12px; color: #7d8798; }
+  </style>
+</head>
+<body>
+  <h1>&#128274; Chrome Password Lock</h1>
+
+  <h2>Пароль</h2>
+  <div id="currentWrap" style="display:none">
+    <label for="current">Текущий пароль</label>
+    <input type="password" id="current" autocomplete="off">
+  </div>
+  <label for="pw">Новый пароль</label>
+  <input type="password" id="pw" autocomplete="off">
+  <label for="pw2">Повторите новый пароль</label>
+  <input type="password" id="pw2" autocomplete="off">
+  <button id="savePw">Сохранить пароль</button>
+  <div class="msg" id="pwMsg"></div>
+
+  <hr>
+
+  <h2>Автоблокировка</h2>
+  <label for="mins">Блокировать Chrome после простоя, минут (1&ndash;1440)</label>
+  <input type="number" id="mins" min="1" max="1440" step="1">
+  <button id="saveMins">Сохранить</button>
+  <div class="msg" id="minsMsg"></div>
+  <p class="hint">Простой считается по активности в Chrome: мышь, клавиатура, прокрутка, переключение вкладок.</p>
+
+  <hr>
+  <button class="ghost" id="lockNow">Заблокировать сейчас</button>
+  <p class="hint">Или горячая клавиша Ctrl+Shift+L.</p>
+
+  <script src="options.js"></script>
+</body>
+</html>

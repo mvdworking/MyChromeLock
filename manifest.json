@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Chrome Password Lock",
+  "version": "2.1",
+  "description": "Блокировка Chrome паролем при запуске и после простоя",
+  "permissions": ["storage", "tabs", "alarms", "idle"],
+  "background": { "service_worker": "background.js" },
+  "options_page": "options.html",
+  "action": { "default_title": "Заблокировать Chrome" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["activity.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "commands": {
+    "lock-now": {
+      "suggested_key": { "default": "Ctrl+Shift+L" },
+      "description": "Заблокировать Chrome"
+    }
+  }
+}
