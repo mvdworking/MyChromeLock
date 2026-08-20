@@ -5,7 +5,7 @@ const DEFAULTS = { timeoutMinutes: 10, hash: null, salt: null, iterations: 15000
 const MAX_ATTEMPTS = 5;
 const PENALTY_MS = 30000;
 
-/* ---------- настройки ---------- */
+/* ---------- settings ---------- */
 async function getSettings() {
   const { settings } = await chrome.storage.local.get('settings');
   return { ...DEFAULTS, ...(settings || {}) };
@@ -16,7 +16,7 @@ async function saveSettings(patch) {
   return next;
 }
 
-/* ---------- пароль: PBKDF2 ---------- */
+/* ---------- password: PBKDF2 ---------- */
 const toHex = (b) => [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
 const fromHex = (h) => Uint8Array.from(h.match(/../g).map(x => parseInt(x, 16)));
 
@@ -44,7 +44,7 @@ async function verifyPassword(password) {
   return diff === 0;
 }
 
-/* ---------- состояние ---------- */
+/* ---------- state ---------- */
 async function isLocked() {
   const s = await getSettings();
   if (!s.hash) return false;
@@ -58,19 +58,19 @@ function redirect(tabId, url = LOCK_URL) {
   return chrome.tabs.update(tabId, { url }).catch(() => {});
 }
 function isAllowed(url) {
-  // При блокировке разрешаем только экран блокировки
+  // While locked, only the lock screen is allowed
   return !!url && url.startsWith(LOCK_URL);
 }
 function isRestorable(url) {
   return /^(https?|file|ftp):/i.test(url || '');
 }
 
-/* ---------- блокировка ---------- */
+/* ---------- lock ---------- */
 async function lock() {
   const s = await getSettings();
   if (!s.hash) {
     chrome.runtime.openOptionsPage();
-    return { ok: false, error: 'Сначала задайте пароль в настройках.' };
+    return { ok: false, error: 'Set a password in settings first.' };
   }
 
   await chrome.storage.session.set({ unlocked: false, attempts: 0, blockedUntil: 0 });
@@ -86,12 +86,10 @@ async function lock() {
     if (isRestorable(url)) {
       saved[String(t.id)] = url;
     }
-    // Перенаправляем все вкладки, включая настройки
     redirect(t.id);
   }
 
   await chrome.storage.session.set({ savedTabs: saved });
-  // Дополнительно ещё раз проходим по вкладкам
   await enforceAll();
   return { ok: true };
 }
@@ -122,21 +120,17 @@ async function unlock(password) {
     return over ? { ok: false, wait: PENALTY_MS / 1000 } : { ok: false, left: MAX_ATTEMPTS - n };
   }
 
-  // 1. Сначала ставим статус разблокировки
   await chrome.storage.session.set({ unlocked: true, attempts: 0, blockedUntil: 0 });
   await touch();
 
-  // 2. Получаем сохранённые URL по tabId
   const { savedTabs = {} } = await chrome.storage.session.get('savedTabs');
 
-  // 3. Собираем все текущие вкладки с экраном блокировки
   const allTabs = await chrome.tabs.query({});
   const lockTabs = allTabs.filter(t => {
     const u = t.url || t.pendingUrl || '';
     return u.startsWith(LOCK_URL);
   });
 
-  // 4. Восстанавливаем вкладки по сохранённым ID
   const restoredIds = new Set();
   for (const [idStr, url] of Object.entries(savedTabs)) {
     if (!isRestorable(url)) continue;
@@ -145,12 +139,9 @@ async function unlock(password) {
     try {
       await chrome.tabs.update(id, { url });
       restoredIds.add(id);
-    } catch (e) {
-      // tabId мог стать недействительным
-    }
+    } catch (e) {}
   }
 
-  // 5. Оставшиеся lock-вкладки и URL
   const remainingUrls = Object.entries(savedTabs)
     .filter(([idStr, url]) => isRestorable(url) && !restoredIds.has(Number(idStr)))
     .map(([, url]) => url);
@@ -162,12 +153,10 @@ async function unlock(password) {
     if (urlIndex < remainingUrls.length) {
       await chrome.tabs.update(tab.id, { url: remainingUrls[urlIndex++] }).catch(() => {});
     } else {
-      // Не закрываем вкладку — переводим на новую вкладку
       await chrome.tabs.update(tab.id, { url: 'chrome://newtab/' }).catch(() => {});
     }
   }
 
-  // 6. Лишние URL — открываем новыми вкладками
   while (urlIndex < remainingUrls.length) {
     await chrome.tabs.create({ url: remainingUrls[urlIndex++], active: false }).catch(() => {});
   }
@@ -176,7 +165,7 @@ async function unlock(password) {
   return { ok: true };
 }
 
-/* ---------- таймер простоя ---------- */
+/* ---------- idle timer ---------- */
 function ensureAlarm() {
   chrome.alarms.create(ALARM, { periodInMinutes: 0.5 });
 }
@@ -200,7 +189,7 @@ chrome.idle.onStateChanged.addListener(async (state) => {
   else if (state === 'active' && !(await isLocked())) await touch();
 });
 
-/* ---------- жизненный цикл ---------- */
+/* ---------- lifecycle ---------- */
 async function boot() {
   ensureAlarm();
   const s = await getSettings();
@@ -216,7 +205,7 @@ boot();
 chrome.runtime.onStartup.addListener(boot);
 chrome.runtime.onInstalled.addListener(boot);
 
-/* ---------- удержание блокировки ---------- */
+/* ---------- keep locked ---------- */
 chrome.tabs.onCreated.addListener(async (tab) => {
   if (tab.id && await isLocked()) redirect(tab.id);
 });
@@ -241,7 +230,7 @@ chrome.windows.onFocusChanged.addListener(async (id) => {
 chrome.action.onClicked.addListener(() => { lock(); });
 chrome.commands.onCommand.addListener((c) => { if (c === 'lock-now') lock(); });
 
-/* ---------- сообщения ---------- */
+/* ---------- messages ---------- */
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   (async () => {
     const s = await getSettings();
@@ -258,9 +247,9 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
         });
 
       case 'createPassword': {
-        if (s.hash) return sendResponse({ ok: false, error: 'Пароль уже задан.' });
+        if (s.hash) return sendResponse({ ok: false, error: 'Password is already set.' });
         if (!msg.password || msg.password.length < 4)
-          return sendResponse({ ok: false, error: 'Минимум 4 символа.' });
+          return sendResponse({ ok: false, error: 'Minimum 4 characters.' });
         await setPassword(msg.password);
         await chrome.storage.session.set({ booted: true, unlocked: true });
         await touch();
@@ -268,11 +257,11 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
       }
 
       case 'changePassword': {
-        if (await isLocked()) return sendResponse({ ok: false, error: 'Сначала разблокируйте Chrome.' });
+        if (await isLocked()) return sendResponse({ ok: false, error: 'Unlock Chrome first.' });
         if (!(await verifyPassword(String(msg.current || ''))))
-          return sendResponse({ ok: false, error: 'Текущий пароль неверный.' });
+          return sendResponse({ ok: false, error: 'Current password is incorrect.' });
         if (!msg.password || msg.password.length < 4)
-          return sendResponse({ ok: false, error: 'Минимум 4 символа.' });
+          return sendResponse({ ok: false, error: 'Minimum 4 characters.' });
         await setPassword(msg.password);
         return sendResponse({ ok: true });
       }
@@ -281,10 +270,10 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
         return sendResponse(await unlock(String(msg.password || '')));
 
       case 'setTimeout': {
-        if (await isLocked()) return sendResponse({ ok: false, error: 'Сначала разблокируйте Chrome.' });
+        if (await isLocked()) return sendResponse({ ok: false, error: 'Unlock Chrome first.' });
         const m = Number(msg.minutes);
         if (!Number.isFinite(m) || m < 1 || m > 1440)
-          return sendResponse({ ok: false, error: 'Допустимо от 1 до 1440 минут.' });
+          return sendResponse({ ok: false, error: 'Allowed range is 1 to 1440 minutes.' });
         await saveSettings({ timeoutMinutes: Math.round(m) });
         await touch();
         return sendResponse({ ok: true });
