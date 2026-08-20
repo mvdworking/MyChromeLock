@@ -58,7 +58,7 @@ function redirect(tabId, url = LOCK_URL) {
   return chrome.tabs.update(tabId, { url }).catch(() => {});
 }
 function isAllowed(url) {
-  return url.startsWith(LOCK_URL) || url.startsWith(OPTIONS_URL);
+  return !!url && (url.startsWith(LOCK_URL) || url.startsWith(OPTIONS_URL));
 }
 function isRestorable(url) {
   return /^(https?|file|ftp):/i.test(url || '');
@@ -72,24 +72,21 @@ async function lock() {
   const already = await isLocked();
   await chrome.storage.session.set({ unlocked: false, attempts: 0, blockedUntil: 0 });
 
-  // Собираем URL всех обычных вкладок (сохраняем порядок)
   const tabs = await chrome.tabs.query({});
-  const { savedUrls: existing = [] } = await chrome.storage.session.get('savedUrls');
-  const saved = [...existing];
+  const { savedTabs: existing = {} } = await chrome.storage.session.get('savedTabs');
+  const saved = { ...existing };
 
   for (const t of tabs) {
     if (!t.id) continue;
     const url = t.pendingUrl || t.url || '';
     if (url.startsWith(LOCK_URL)) continue;
-    if (isRestorable(url) && !saved.includes(url)) {
-      saved.push(url);
+    if (isRestorable(url)) {
+      saved[String(t.id)] = url;
     }
-    // Перенаправляем на экран блокировки
     redirect(t.id);
   }
 
-  await chrome.storage.session.set({ savedUrls: saved });
-
+  await chrome.storage.session.set({ savedTabs: saved });
   if (already) return enforceAll();
 }
 
@@ -119,52 +116,60 @@ async function unlock(password) {
     return over ? { ok: false, wait: PENALTY_MS / 1000 } : { ok: false, left: MAX_ATTEMPTS - n };
   }
 
-  // 1. Ставим статус «разблокировано»
+  // 1. Сначала ставим статус разблокировки
   await chrome.storage.session.set({ unlocked: true, attempts: 0, blockedUntil: 0 });
   await touch();
 
-  // 2. Берём сохранённые URL
-  const { savedUrls = [] } = await chrome.storage.session.get('savedUrls');
-  const urls = savedUrls.filter(isRestorable);
+  // 2. Получаем сохранённые URL по tabId
+  const { savedTabs = {} } = await chrome.storage.session.get('savedTabs');
 
-  // 3. Находим все вкладки, которые сейчас показывают экран блокировки
+  // 3. Собираем все текущие вкладки с экраном блокировки
   const allTabs = await chrome.tabs.query({});
   const lockTabs = allTabs.filter(t => {
     const u = t.url || t.pendingUrl || '';
     return u.startsWith(LOCK_URL);
   });
 
-  // 4. Восстанавливаем: сначала используем существующие lock-вкладки, потом открываем новые
-  const tasks = [];
+  // 4. Восстанавливаем вкладки по сохранённым ID (самый надёжный способ)
+  const restoredIds = new Set();
+  for (const [idStr, url] of Object.entries(savedTabs)) {
+    if (!isRestorable(url)) continue;
+    const id = Number(idStr);
+    if (!Number.isFinite(id)) continue;
+    try {
+      await chrome.tabs.update(id, { url });
+      restoredIds.add(id);
+    } catch (e) {
+      // tabId мог стать недействительным — откроем новую вкладку позже
+    }
+  }
 
-  for (let i = 0; i < urls.length; i++) {
-    if (i < lockTabs.length) {
-      // Перенаправляем существующую вкладку блокировки на оригинальный URL
-      tasks.push(chrome.tabs.update(lockTabs[i].id, { url: urls[i] }).catch(() => {}));
+  // 5. Для тех lock-вкладок, которые не удалось восстановить по ID —
+  //    используем оставшиеся URL или просто уводим с экрана блокировки
+  const remainingUrls = Object.entries(savedTabs)
+    .filter(([idStr, url]) => isRestorable(url) && !restoredIds.has(Number(idStr)))
+    .map(([, url]) => url);
+
+  let urlIndex = 0;
+  for (const tab of lockTabs) {
+    if (restoredIds.has(tab.id)) continue;
+
+    if (urlIndex < remainingUrls.length) {
+      // Есть ещё невосстановленный URL — используем эту вкладку
+      await chrome.tabs.update(tab.id, { url: remainingUrls[urlIndex++] }).catch(() => {});
     } else {
-      // Открываем новую вкладку для оставшихся URL
-      tasks.push(chrome.tabs.create({ url: urls[i], active: false }).catch(() => {}));
+      // Больше URL нет — просто уводим с экрана блокировки на новую вкладку
+      // (не закрываем вкладку, чтобы окно браузера не исчезло)
+      await chrome.tabs.update(tab.id, { url: 'chrome://newtab/' }).catch(() => {});
     }
   }
 
-  // 5. Лишние вкладки блокировки закрываем
-  for (let i = urls.length; i < lockTabs.length; i++) {
-    tasks.push(chrome.tabs.remove(lockTabs[i].id).catch(() => {}));
+  // 6. Если остались URL, для которых не хватило вкладок — открываем новые
+  while (urlIndex < remainingUrls.length) {
+    await chrome.tabs.create({ url: remainingUrls[urlIndex++], active: false }).catch(() => {});
   }
 
-  // Если вообще не было сохранённых URL — просто закрываем экраны блокировки
-  // (или оставляем одну пустую вкладку)
-  if (urls.length === 0 && lockTabs.length > 0) {
-    // Оставляем первую вкладку и переводим её на новую вкладку Chrome
-    tasks.push(chrome.tabs.update(lockTabs[0].id, { url: 'chrome://newtab/' }).catch(() => {}));
-    for (let i = 1; i < lockTabs.length; i++) {
-      tasks.push(chrome.tabs.remove(lockTabs[i].id).catch(() => {}));
-    }
-  }
-
-  await Promise.all(tasks);
-  await chrome.storage.session.remove('savedUrls');
-
+  await chrome.storage.session.remove('savedTabs');
   return { ok: true };
 }
 
