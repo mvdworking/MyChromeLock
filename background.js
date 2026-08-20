@@ -55,10 +55,13 @@ async function touch() {
   await chrome.storage.session.set({ lastActivity: Date.now() });
 }
 function redirect(tabId, url = LOCK_URL) {
-  chrome.tabs.update(tabId, { url }).catch(() => {});
+  return chrome.tabs.update(tabId, { url }).catch(() => {});
 }
 function isAllowed(url) {
   return url.startsWith(LOCK_URL) || url.startsWith(OPTIONS_URL);
+}
+function isRestorable(url) {
+  return /^(https?|file|ftp):/i.test(url || '');
 }
 
 /* ---------- блокировка ---------- */
@@ -68,20 +71,26 @@ async function lock() {
 
   const already = await isLocked();
   await chrome.storage.session.set({ unlocked: false, attempts: 0, blockedUntil: 0 });
-  if (already) return enforceAll();
 
+  // Собираем URL всех обычных вкладок (сохраняем порядок)
   const tabs = await chrome.tabs.query({});
-  const { savedTabs: existingSaved = {} } = await chrome.storage.session.get('savedTabs');
-  const saved = { ...existingSaved };
+  const { savedUrls: existing = [] } = await chrome.storage.session.get('savedUrls');
+  const saved = [...existing];
 
   for (const t of tabs) {
     if (!t.id) continue;
     const url = t.pendingUrl || t.url || '';
     if (url.startsWith(LOCK_URL)) continue;
-    if (/^(https?|file|ftp):/i.test(url)) saved[t.id] = url;
+    if (isRestorable(url) && !saved.includes(url)) {
+      saved.push(url);
+    }
+    // Перенаправляем на экран блокировки
     redirect(t.id);
   }
-  await chrome.storage.session.set({ savedTabs: saved });
+
+  await chrome.storage.session.set({ savedUrls: saved });
+
+  if (already) return enforceAll();
 }
 
 async function enforceAll() {
@@ -110,18 +119,51 @@ async function unlock(password) {
     return over ? { ok: false, wait: PENALTY_MS / 1000 } : { ok: false, left: MAX_ATTEMPTS - n };
   }
 
-  // 1. Устанавливаем статус разблокировки
+  // 1. Ставим статус «разблокировано»
   await chrome.storage.session.set({ unlocked: true, attempts: 0, blockedUntil: 0 });
   await touch();
 
-  // 2. Восстанавливаем оригинальные URL вкладок
-  const { savedTabs } = await chrome.storage.session.get('savedTabs');
-  if (savedTabs) {
-    for (const [id, url] of Object.entries(savedTabs)) {
-      redirect(Number(id), url);
+  // 2. Берём сохранённые URL
+  const { savedUrls = [] } = await chrome.storage.session.get('savedUrls');
+  const urls = savedUrls.filter(isRestorable);
+
+  // 3. Находим все вкладки, которые сейчас показывают экран блокировки
+  const allTabs = await chrome.tabs.query({});
+  const lockTabs = allTabs.filter(t => {
+    const u = t.url || t.pendingUrl || '';
+    return u.startsWith(LOCK_URL);
+  });
+
+  // 4. Восстанавливаем: сначала используем существующие lock-вкладки, потом открываем новые
+  const tasks = [];
+
+  for (let i = 0; i < urls.length; i++) {
+    if (i < lockTabs.length) {
+      // Перенаправляем существующую вкладку блокировки на оригинальный URL
+      tasks.push(chrome.tabs.update(lockTabs[i].id, { url: urls[i] }).catch(() => {}));
+    } else {
+      // Открываем новую вкладку для оставшихся URL
+      tasks.push(chrome.tabs.create({ url: urls[i], active: false }).catch(() => {}));
     }
-    await chrome.storage.session.remove('savedTabs');
   }
+
+  // 5. Лишние вкладки блокировки закрываем
+  for (let i = urls.length; i < lockTabs.length; i++) {
+    tasks.push(chrome.tabs.remove(lockTabs[i].id).catch(() => {}));
+  }
+
+  // Если вообще не было сохранённых URL — просто закрываем экраны блокировки
+  // (или оставляем одну пустую вкладку)
+  if (urls.length === 0 && lockTabs.length > 0) {
+    // Оставляем первую вкладку и переводим её на новую вкладку Chrome
+    tasks.push(chrome.tabs.update(lockTabs[0].id, { url: 'chrome://newtab/' }).catch(() => {}));
+    for (let i = 1; i < lockTabs.length; i++) {
+      tasks.push(chrome.tabs.remove(lockTabs[i].id).catch(() => {}));
+    }
+  }
+
+  await Promise.all(tasks);
+  await chrome.storage.session.remove('savedUrls');
 
   return { ok: true };
 }
