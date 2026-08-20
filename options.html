@@ -1,8 +1,8 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Настройки Chrome Password Lock</title>
+  <title>Chrome Password Lock Settings</title>
   <style>
     body { font: 14px/1.55 system-ui, 'Segoe UI', sans-serif; max-width: 470px; margin: 40px auto; padding: 0 20px; color: #1c2130; }
     h1 { font-size: 19px; }
@@ -20,30 +20,30 @@
 <body>
   <h1>&#128274; Chrome Password Lock</h1>
 
-  <h2>Пароль</h2>
+  <h2>Password</h2>
   <div id="currentWrap" style="display:none">
-    <label for="current">Текущий пароль</label>
+    <label for="current">Current password</label>
     <input type="password" id="current" autocomplete="off">
   </div>
-  <label for="pw">Новый пароль</label>
+  <label for="pw">New password</label>
   <input type="password" id="pw" autocomplete="off">
-  <label for="pw2">Повторите новый пароль</label>
+  <label for="pw2">Confirm new password</label>
   <input type="password" id="pw2" autocomplete="off">
-  <button id="savePw">Сохранить пароль</button>
+  <button id="savePw">Save password</button>
   <div class="msg" id="pwMsg"></div>
 
   <hr>
 
-  <h2>Автоблокировка</h2>
-  <label for="mins">Блокировать Chrome после простоя, минут (1&ndash;1440)</label>
+  <h2>Auto-lock</h2>
+  <label for="mins">Lock Chrome after idle time, minutes (1&ndash;1440)</label>
   <input type="number" id="mins" min="1" max="1440" step="1">
-  <button id="saveMins">Сохранить</button>
+  <button id="saveMins">Save</button>
   <div class="msg" id="minsMsg"></div>
-  <p class="hint">Простой считается по активности в Chrome: мышь, клавиатура, прокрутка, переключение вкладок.</p>
+  <p class="hint">Idle is based on activity in Chrome: mouse, keyboard, scrolling, tab switching.</p>
 
   <hr>
-  <button class="ghost" id="lockNow">Заблокировать сейчас</button>
-  <p class="hint">Или горячая клавиша Ctrl+Shift+L.</p>
+  <button class="ghost" id="lockNow">Lock now</button>
+  <p class="hint">Or use the hotkey Ctrl+Shift+L.</p>
 
   <script src="options.js"></script>
 </body>
