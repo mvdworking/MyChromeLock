@@ -65,6 +65,16 @@ function isRestorable(url) {
   return /^(https?|file|ftp):/i.test(url || '');
 }
 
+async function saveUrlIfNeeded(url) {
+  if (!isRestorable(url)) return;
+  const { savedTabs = [] } = await chrome.storage.session.get('savedTabs');
+  let saved = Array.isArray(savedTabs) ? [...savedTabs] : Object.values(savedTabs || {});
+  if (!saved.includes(url)) {
+    saved.push(url);
+    await chrome.storage.session.set({ savedTabs: saved });
+  }
+}
+
 /* ---------- lock ---------- */
 async function lock() {
   const s = await getSettings();
@@ -196,7 +206,8 @@ async function boot() {
   const { booted } = await chrome.storage.session.get('booted');
   if (booted) return;
   await chrome.storage.session.set({ booted: true, unlocked: false });
-  await lock();
+  // Delay to allow Chrome to finish restoring previous session tabs
+  setTimeout(() => { lock(); }, 1200);
 }
 boot();
 
@@ -205,21 +216,17 @@ chrome.runtime.onInstalled.addListener(boot);
 
 /* ---------- keep locked ---------- */
 chrome.tabs.onCreated.addListener(async (tab) => {
-  if (tab.id && await isLocked()) redirect(tab.id);
+  if (!tab.id || !(await isLocked())) return;
+  const url = tab.pendingUrl || tab.url || '';
+  if (isRestorable(url)) await saveUrlIfNeeded(url);
+  redirect(tab.id);
 });
 chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
   if (!info.url && info.status !== 'loading') return;
   const url = info.url || tab.pendingUrl || tab.url || '';
   if (await isLocked()) {
     if (!isAllowed(url)) {
-      if (isRestorable(url)) {
-        const { savedTabs = [] } = await chrome.storage.session.get('savedTabs');
-        let saved = Array.isArray(savedTabs) ? [...savedTabs] : Object.values(savedTabs || {});
-        if (!saved.includes(url)) {
-          saved.push(url);
-          await chrome.storage.session.set({ savedTabs: saved });
-        }
-      }
+      if (isRestorable(url)) await saveUrlIfNeeded(url);
       redirect(tabId);
     }
   } else await touch();
