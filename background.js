@@ -1,6 +1,7 @@
 const LOCK_URL = chrome.runtime.getURL('lock.html');
 const OPTIONS_URL = chrome.runtime.getURL('options.html');
 const ALARM = 'lock-watchdog';
+const STARTUP_ALARM = 'startup-lock';
 const DEFAULTS = { timeoutMinutes: 10, hash: null, salt: null, iterations: 150000 };
 const MAX_ATTEMPTS = 5;
 const PENALTY_MS = 30000;
@@ -58,25 +59,69 @@ function redirect(tabId, url = LOCK_URL) {
   return chrome.tabs.update(tabId, { url }).catch(() => {});
 }
 function isAllowed(url) {
-  // While locked, only the lock screen is allowed
   return !!url && url.startsWith(LOCK_URL);
 }
 function isRestorable(url) {
   return /^(https?|file|ftp):/i.test(url || '');
 }
+function isBlank(url) {
+  if (!url) return true;
+  return (
+    url === 'about:blank' ||
+    url.startsWith('about:') ||
+    url.startsWith('chrome://newtab') ||
+    url.startsWith('chrome://new-tab-page')
+  );
+}
+function tabUrl(tab) {
+  return (tab && (tab.pendingUrl || tab.url)) || '';
+}
+async function inGrace() {
+  const { startupGrace } = await chrome.storage.session.get('startupGrace');
+  return startupGrace === true;
+}
 
-async function saveUrlIfNeeded(url) {
-  if (!isRestorable(url)) return;
-  const { savedTabs = [] } = await chrome.storage.session.get('savedTabs');
-  let saved = Array.isArray(savedTabs) ? [...savedTabs] : Object.values(savedTabs || {});
-  if (!saved.includes(url)) {
-    saved.push(url);
-    await chrome.storage.session.set({ savedTabs: saved });
+function normalizeSaved(raw) {
+  if (Array.isArray(raw)) {
+    return raw.map((item) => {
+      if (typeof item === 'string') return { id: null, url: item };
+      return {
+        id: item && item.id != null && Number.isFinite(Number(item.id)) ? Number(item.id) : null,
+        url: item && item.url
+      };
+    }).filter((item) => isRestorable(item.url));
   }
+  if (raw && typeof raw === 'object') {
+    return Object.entries(raw)
+      .map(([id, url]) => ({ id: Number(id), url }))
+      .filter((item) => isRestorable(item.url));
+  }
+  return [];
+}
+
+let saveChain = Promise.resolve();
+async function rememberTabNow(tabId, url) {
+  if (!isRestorable(url)) return;
+  const { savedTabs } = await chrome.storage.session.get('savedTabs');
+  const list = normalizeSaved(savedTabs);
+  const id = Number(tabId);
+  if (Number.isFinite(id)) {
+    const idx = list.findIndex((item) => item.id === id);
+    if (idx >= 0) list[idx].url = url;
+    else list.push({ id, url });
+  } else {
+    list.push({ id: null, url });
+  }
+  await chrome.storage.session.set({ savedTabs: list });
+}
+function rememberTab(tabId, url) {
+  const run = saveChain.then(() => rememberTabNow(tabId, url));
+  saveChain = run.catch(() => {});
+  return run;
 }
 
 /* ---------- lock ---------- */
-async function lock() {
+async function lock(opts = {}) {
   const s = await getSettings();
   if (!s.hash) {
     chrome.runtime.openOptionsPage();
@@ -84,31 +129,42 @@ async function lock() {
   }
 
   await chrome.storage.session.set({ unlocked: false, attempts: 0, blockedUntil: 0 });
+  const grace = opts.forceBlank ? false : await inGrace();
 
   const tabs = await chrome.tabs.query({});
-  const { savedTabs: existing = [] } = await chrome.storage.session.get('savedTabs');
-  let saved = Array.isArray(existing) ? [...existing] : Object.values(existing || {});
-
-  const current = [];
   for (const t of tabs) {
     if (!t.id) continue;
-    const url = t.pendingUrl || t.url || '';
-    if (url.startsWith(LOCK_URL)) continue;
-    if (isRestorable(url)) current.push(url);
-    redirect(t.id);
+    const url = tabUrl(t);
+    if (isAllowed(url)) continue;
+    if (isRestorable(url)) {
+      await rememberTab(t.id, url);
+      if (!grace) redirect(t.id);
+    } else if (!grace) {
+      redirect(t.id);
+    }
   }
-
-  if (current.length > 0) saved = current;
-  await chrome.storage.session.set({ savedTabs: saved });
-  await enforceAll();
   return { ok: true };
 }
 
+async function lockImmediate() {
+  await chrome.storage.session.set({ startupGrace: false });
+  chrome.alarms.clear(STARTUP_ALARM);
+  return lock({ forceBlank: true });
+}
+
 async function enforceAll() {
+  const grace = await inGrace();
   const tabs = await chrome.tabs.query({});
   for (const t of tabs) {
-    const url = t.pendingUrl || t.url || '';
-    if (t.id && !url.startsWith(LOCK_URL)) redirect(t.id);
+    if (!t.id) continue;
+    const url = tabUrl(t);
+    if (isAllowed(url)) continue;
+    if (isRestorable(url)) {
+      await rememberTab(t.id, url);
+      if (!grace) redirect(t.id);
+    } else if (!grace) {
+      redirect(t.id);
+    }
   }
 }
 
@@ -134,39 +190,41 @@ async function unlock(password) {
     unlocked: true,
     attempts: 0,
     blockedUntil: 0,
-    lastActivity: Date.now()
+    lastActivity: Date.now(),
+    startupGrace: false
   });
 
-  const { savedTabs = [] } = await chrome.storage.session.get('savedTabs');
-  let urls = [];
-  if (Array.isArray(savedTabs)) {
-    urls = savedTabs.filter(isRestorable);
-  } else if (savedTabs && typeof savedTabs === 'object') {
-    urls = Object.values(savedTabs).filter(isRestorable);
-  }
+  const { savedTabs } = await chrome.storage.session.get('savedTabs');
+  const list = normalizeSaved(savedTabs);
+  const restoredIds = new Set();
+  const missed = [];
 
-  const allTabs = await chrome.tabs.query({});
-  const lockTabs = allTabs.filter(t => {
-    const u = t.url || t.pendingUrl || '';
-    return u.startsWith(LOCK_URL);
-  });
-
-  let urlIndex = 0;
-  for (const tab of lockTabs) {
-    if (urlIndex < urls.length) {
-      try {
-        await chrome.tabs.update(tab.id, { url: urls[urlIndex] });
-        urlIndex++;
-      } catch (e) {
-        await chrome.tabs.update(tab.id, { url: 'chrome://newtab/' }).catch(() => {});
-      }
-    } else {
-      await chrome.tabs.update(tab.id, { url: 'chrome://newtab/' }).catch(() => {});
+  for (const item of list) {
+    if (!Number.isFinite(item.id)) {
+      missed.push(item.url);
+      continue;
+    }
+    try {
+      await chrome.tabs.update(item.id, { url: item.url });
+      restoredIds.add(item.id);
+    } catch (e) {
+      missed.push(item.url);
     }
   }
 
-  while (urlIndex < urls.length) {
-    await chrome.tabs.create({ url: urls[urlIndex++], active: false }).catch(() => {});
+  const allTabs = await chrome.tabs.query({});
+  const lockTabs = allTabs.filter((t) => tabUrl(t).startsWith(LOCK_URL) && !restoredIds.has(t.id));
+
+  let i = 0;
+  for (const tab of lockTabs) {
+    if (i < missed.length) {
+      await chrome.tabs.update(tab.id, { url: missed[i++] }).catch(() => {});
+    } else if (!isBlank(tabUrl(tab))) {
+      await chrome.tabs.update(tab.id, { url: 'chrome://newtab/' }).catch(() => {});
+    }
+  }
+  while (i < missed.length) {
+    await chrome.tabs.create({ url: missed[i++], active: false }).catch(() => {});
   }
 
   await chrome.storage.session.remove('savedTabs');
@@ -179,6 +237,11 @@ function ensureAlarm() {
 }
 
 chrome.alarms.onAlarm.addListener(async (a) => {
+  if (a.name === STARTUP_ALARM) {
+    await chrome.storage.session.set({ startupGrace: false });
+    await lock({ forceBlank: true });
+    return;
+  }
   if (a.name !== ALARM) return;
   const s = await getSettings();
   if (!s.hash) return;
@@ -186,28 +249,32 @@ chrome.alarms.onAlarm.addListener(async (a) => {
 
   const { lastActivity } = await chrome.storage.session.get('lastActivity');
   if (!lastActivity) return touch();
-  if (Date.now() - lastActivity >= Math.max(1, s.timeoutMinutes) * 60000) await lock();
+  if (Date.now() - lastActivity >= Math.max(1, s.timeoutMinutes) * 60000) await lockImmediate();
 });
 
 chrome.idle.setDetectionInterval(60);
 chrome.idle.onStateChanged.addListener(async (state) => {
   const s = await getSettings();
   if (!s.hash) return;
-  if (state === 'locked') await lock();
+  if (state === 'locked') await lockImmediate();
   else if (state === 'active' && !(await isLocked())) await touch();
 });
 
 /* ---------- lifecycle ---------- */
+let booting = null;
 async function boot() {
-  ensureAlarm();
-  const s = await getSettings();
-  if (!s.hash) { chrome.runtime.openOptionsPage(); return; }
+  if (booting) return booting;
+  booting = (async () => {
+    ensureAlarm();
+    const s = await getSettings();
+    if (!s.hash) { chrome.runtime.openOptionsPage(); return; }
 
-  const { booted } = await chrome.storage.session.get('booted');
-  if (booted) return;
-  await chrome.storage.session.set({ booted: true, unlocked: false });
-  // Delay to allow Chrome to finish restoring previous session tabs
-  setTimeout(() => { lock(); }, 1200);
+    const { booted } = await chrome.storage.session.get('booted');
+    if (booted) return;
+    await chrome.storage.session.set({ booted: true, unlocked: false, startupGrace: true });
+    chrome.alarms.create(STARTUP_ALARM, { when: Date.now() + 4000 });
+  })();
+  try { await booting; } finally { booting = null; }
 }
 boot();
 
@@ -217,19 +284,26 @@ chrome.runtime.onInstalled.addListener(boot);
 /* ---------- keep locked ---------- */
 chrome.tabs.onCreated.addListener(async (tab) => {
   if (!tab.id || !(await isLocked())) return;
-  const url = tab.pendingUrl || tab.url || '';
-  if (isRestorable(url)) await saveUrlIfNeeded(url);
+  const url = tabUrl(tab);
+  if (isRestorable(url)) await rememberTab(tab.id, url);
+  if (await inGrace()) return;
   redirect(tab.id);
 });
 chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
-  if (!info.url && info.status !== 'loading') return;
+  if (!info.url && info.status !== 'loading' && info.status !== 'complete') return;
   const url = info.url || tab.pendingUrl || tab.url || '';
-  if (await isLocked()) {
-    if (!isAllowed(url)) {
-      if (isRestorable(url)) await saveUrlIfNeeded(url);
-      redirect(tabId);
-    }
-  } else await touch();
+  if (!(await isLocked())) {
+    await touch();
+    return;
+  }
+  if (isAllowed(url)) return;
+  if (isRestorable(url)) await rememberTab(tabId, url);
+  if (await inGrace()) {
+    const finalUrl = tab.url || url;
+    if (info.status === 'complete' && isRestorable(finalUrl)) redirect(tabId);
+    return;
+  }
+  redirect(tabId);
 });
 chrome.tabs.onActivated.addListener(async () => {
   if (await isLocked()) enforceAll(); else await touch();
@@ -242,8 +316,8 @@ chrome.windows.onFocusChanged.addListener(async (id) => {
   if (await isLocked()) enforceAll(); else await touch();
 });
 
-chrome.action.onClicked.addListener(() => { lock(); });
-chrome.commands.onCommand.addListener((c) => { if (c === 'lock-now') lock(); });
+chrome.action.onClicked.addListener(() => { lockImmediate(); });
+chrome.commands.onCommand.addListener((c) => { if (c === 'lock-now') lockImmediate(); });
 
 /* ---------- messages ---------- */
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
@@ -266,7 +340,7 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
         if (!msg.password || msg.password.length < 4)
           return sendResponse({ ok: false, error: 'Minimum 4 characters.' });
         await setPassword(msg.password);
-        await chrome.storage.session.set({ booted: true, unlocked: true });
+        await chrome.storage.session.set({ booted: true, unlocked: true, startupGrace: false });
         await touch();
         return sendResponse({ ok: true });
       }
@@ -295,7 +369,7 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
       }
 
       case 'lockNow':
-        return sendResponse(await lock());
+        return sendResponse(await lockImmediate());
 
       case 'openOptions':
         chrome.runtime.openOptionsPage();
