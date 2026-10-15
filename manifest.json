@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Chrome Password Lock",
-  "version": "2.2.3",
+  "version": "2.2.4",
   "description": "Lock Chrome with a password on startup and after idle time",
   "permissions": ["storage", "tabs", "alarms", "idle"],
   "background": { "service_worker": "background.js" },
