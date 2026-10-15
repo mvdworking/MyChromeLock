@@ -36,7 +36,7 @@ Lock Google Chrome with a password on startup and after idle time.
 
 ## Version
 
-Current version: **2.2.3**
+Current version: **2.2.4**
 
 ## License
 
