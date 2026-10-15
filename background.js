@@ -76,19 +76,19 @@ async function lock() {
   await chrome.storage.session.set({ unlocked: false, attempts: 0, blockedUntil: 0 });
 
   const tabs = await chrome.tabs.query({});
-  const { savedTabs: existing = {} } = await chrome.storage.session.get('savedTabs');
-  const saved = { ...existing };
+  const { savedTabs: existing = [] } = await chrome.storage.session.get('savedTabs');
+  let saved = Array.isArray(existing) ? [...existing] : Object.values(existing || {});
 
+  const current = [];
   for (const t of tabs) {
     if (!t.id) continue;
     const url = t.pendingUrl || t.url || '';
     if (url.startsWith(LOCK_URL)) continue;
-    if (isRestorable(url)) {
-      saved[String(t.id)] = url;
-    }
+    if (isRestorable(url)) current.push(url);
     redirect(t.id);
   }
 
+  if (current.length > 0) saved = current;
   await chrome.storage.session.set({ savedTabs: saved });
   await enforceAll();
   return { ok: true };
@@ -120,10 +120,20 @@ async function unlock(password) {
     return over ? { ok: false, wait: PENALTY_MS / 1000 } : { ok: false, left: MAX_ATTEMPTS - n };
   }
 
-  await chrome.storage.session.set({ unlocked: true, attempts: 0, blockedUntil: 0 });
-  await touch();
+  await chrome.storage.session.set({
+    unlocked: true,
+    attempts: 0,
+    blockedUntil: 0,
+    lastActivity: Date.now()
+  });
 
-  const { savedTabs = {} } = await chrome.storage.session.get('savedTabs');
+  const { savedTabs = [] } = await chrome.storage.session.get('savedTabs');
+  let urls = [];
+  if (Array.isArray(savedTabs)) {
+    urls = savedTabs.filter(isRestorable);
+  } else if (savedTabs && typeof savedTabs === 'object') {
+    urls = Object.values(savedTabs).filter(isRestorable);
+  }
 
   const allTabs = await chrome.tabs.query({});
   const lockTabs = allTabs.filter(t => {
@@ -131,34 +141,22 @@ async function unlock(password) {
     return u.startsWith(LOCK_URL);
   });
 
-  const restoredIds = new Set();
-  for (const [idStr, url] of Object.entries(savedTabs)) {
-    if (!isRestorable(url)) continue;
-    const id = Number(idStr);
-    if (!Number.isFinite(id)) continue;
-    try {
-      await chrome.tabs.update(id, { url });
-      restoredIds.add(id);
-    } catch (e) {}
-  }
-
-  const remainingUrls = Object.entries(savedTabs)
-    .filter(([idStr, url]) => isRestorable(url) && !restoredIds.has(Number(idStr)))
-    .map(([, url]) => url);
-
   let urlIndex = 0;
   for (const tab of lockTabs) {
-    if (restoredIds.has(tab.id)) continue;
-
-    if (urlIndex < remainingUrls.length) {
-      await chrome.tabs.update(tab.id, { url: remainingUrls[urlIndex++] }).catch(() => {});
+    if (urlIndex < urls.length) {
+      try {
+        await chrome.tabs.update(tab.id, { url: urls[urlIndex] });
+        urlIndex++;
+      } catch (e) {
+        await chrome.tabs.update(tab.id, { url: 'chrome://newtab/' }).catch(() => {});
+      }
     } else {
       await chrome.tabs.update(tab.id, { url: 'chrome://newtab/' }).catch(() => {});
     }
   }
 
-  while (urlIndex < remainingUrls.length) {
-    await chrome.tabs.create({ url: remainingUrls[urlIndex++], active: false }).catch(() => {});
+  while (urlIndex < urls.length) {
+    await chrome.tabs.create({ url: urls[urlIndex++], active: false }).catch(() => {});
   }
 
   await chrome.storage.session.remove('savedTabs');
