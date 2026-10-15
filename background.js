@@ -211,7 +211,17 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
   if (!info.url && info.status !== 'loading') return;
   const url = info.url || tab.pendingUrl || tab.url || '';
   if (await isLocked()) {
-    if (!isAllowed(url)) redirect(tabId);
+    if (!isAllowed(url)) {
+      if (isRestorable(url)) {
+        const { savedTabs = [] } = await chrome.storage.session.get('savedTabs');
+        let saved = Array.isArray(savedTabs) ? [...savedTabs] : Object.values(savedTabs || {});
+        if (!saved.includes(url)) {
+          saved.push(url);
+          await chrome.storage.session.set({ savedTabs: saved });
+        }
+      }
+      redirect(tabId);
+    }
   } else await touch();
 });
 chrome.tabs.onActivated.addListener(async () => {
